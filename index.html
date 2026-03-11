@@ -3,31 +3,29 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>勤務補給導航系統</title>
+    <title>勤務補給導航系統 v2.0</title>
     <style>
-        /* 💡 修正 1：鎖定網頁滑動，防止地圖操作時網頁亂跑 */
         html, body { 
             margin: 0; padding: 0; height: 100%; width: 100%; 
-            overflow: hidden; /* 禁止網頁本身捲動 */
-            overscroll-behavior: none; /* 禁止手機下拉更新效果 */
-            position: fixed; /* 徹底鎖定背景 */
+            overflow: hidden; overscroll-behavior: none; position: fixed; 
         }
-        
-        #map { height: 75vh; width: 100%; touch-action: none; }
-        
+        #map { height: 70vh; width: 100%; touch-action: none; }
         .panel { 
-            height: 25vh; background: #2c3e50; color: white; padding: 15px; 
-            box-sizing: border-box; z-index: 100; position: relative;
+            height: 30vh; background: #2c3e50; color: white; padding: 12px; 
+            box-sizing: border-box; z-index: 100; position: relative; overflow-y: auto;
         }
-        
         #alertBox { 
-            background: #e67e22; padding: 10px; border-radius: 5px; 
-            margin-bottom: 8px; display: none; font-weight: bold; 
+            background: #e74c3c; padding: 10px; border-radius: 5px; 
+            margin-bottom: 8px; display: none; font-weight: bold; text-align: center;
         }
-
-        .controls { display: flex; justify-content: space-between; align-items: flex-start; }
-        .btn-upload { background: #3498db; color: white; padding: 12px 20px; border-radius: 8px; border: none; font-weight: bold; }
-        .status-text { font-size: 0.8em; color: #bdc3c7; line-height: 1.5; }
+        .controls { display: flex; justify-content: space-between; gap: 10px; }
+        .btn { 
+            flex: 1; padding: 12px; border-radius: 8px; border: none; 
+            font-weight: bold; cursor: pointer; color: white;
+        }
+        .btn-upload { background: #3498db; }
+        .btn-nav { background: #27ae60; }
+        .status-text { font-size: 0.8em; color: #bdc3c7; line-height: 1.4; }
     </style>
 </head>
 <body>
@@ -35,15 +33,18 @@
     <div id="map"></div>
 
     <div class="panel">
-        <div id="alertBox">⚠️ 抵達補給點！</div>
+        <div id="alertBox">⚠️ 偵測到補給點！</div>
         <div class="controls">
-            <div>
+            <div style="flex: 2;">
                 <strong>勤務控制台</strong><br>
                 <span id="gpsStatus" class="status-text">GPS 初始化...</span><br>
                 <span id="dbStatus" class="status-text">雲端狀態：待機</span>
             </div>
+            <button class="btn btn-upload" onclick="document.getElementById('kmlInput').click()">匯入 KML</button>
             <input type="file" id="kmlInput" accept=".kml" style="display:none;" />
-            <button class="btn-upload" onclick="document.getElementById('kmlInput').click()">匯入 KML 點位</button>
+        </div>
+        <div id="navInfo" class="status-text" style="margin-top:10px; border-top:1px solid #444; pt-5px;">
+            路徑提示：點擊地圖標記開啟導航
         </div>
     </div>
 
@@ -51,9 +52,9 @@
 
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
-        import { getFirestore, collection, addDoc, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+        import { getFirestore, collection, addDoc, onSnapshot, serverTimestamp, updateDoc, doc } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 
-        // 🔥 請務必確認以下欄位已正確填寫 🔥
+        // Firebase 配置 (請根據您的專案填寫)
         const firebaseConfig = {
             apiKey: "AIzaSyAHLUkaGRW7j7ZHFaTEJMKNbkMzZm218w4",
             authDomain: "你的專案.firebaseapp.com",
@@ -67,55 +68,117 @@
         const db = getFirestore(app);
         
         let map, userMarker, supplyPoints = [];
+        let directionsService, directionsRenderer;
+
+        // 圖示定義 (範例 URL)
+        const iconStyles = {
+            'fuel': 'https://maps.google.com/mapfiles/ms/icons/orange-dot.png',
+            'medical': 'https://maps.google.com/mapfiles/ms/icons/red-dot.png',
+            'default': 'https://maps.google.com/mapfiles/ms/icons/blue-dot.png'
+        };
 
         function initMap() {
+            // 1. 地圖顯示優化
             map = new google.maps.Map(document.getElementById("map"), {
                 center: { lat: 25.033, lng: 121.565 },
-                zoom: 17,
+                zoom: 16,
                 mapTypeId: 'hybrid',
                 tilt: 45,
-                gestureHandling: "greedy" // 💡 讓地圖優先處理所有手勢
+                gestureHandling: "greedy" 
             });
+
+            directionsService = new google.maps.DirectionsService();
+            directionsRenderer = new google.maps.DirectionsRenderer({ map: map, suppressMarkers: true });
+
+            // 2. 勤務範圍繪製工具
+            const drawingManager = new google.maps.drawing.DrawingManager({
+                drawingMode: null,
+                drawingControl: true,
+                drawingControlOptions: {
+                    position: google.maps.ControlPosition.TOP_CENTER,
+                    drawingModes: ['polygon', 'circle']
+                },
+                polygonOptions: { fillColor: '#3498db', fillOpacity: 0.3, strokeWeight: 2 }
+            });
+            drawingManager.setMap(map);
 
             syncData();
             startGPS();
         }
 
+        // A. 地圖顯示與雲端同步
         function syncData() {
             onSnapshot(collection(db, "supplies"), (snapshot) => {
                 supplyPoints.forEach(p => p.marker.setMap(null));
                 supplyPoints = [];
-                snapshot.forEach((doc) => {
-                    const data = doc.data();
+                
+                snapshot.forEach((d) => {
+                    const data = d.data();
                     const marker = new google.maps.Marker({
                         position: data.position,
                         map: map,
-                        title: data.name
+                        title: data.name,
+                        icon: data.status === 'arrived' ? '' : (iconStyles[data.type] || iconStyles.default)
                     });
-                    supplyPoints.push({ ...data, marker });
+
+                    // 點擊標記觸發自動導航
+                    marker.addListener("click", () => calculateRoute(data.position, data.name));
+                    
+                    supplyPoints.push({ id: d.id, ...data, marker });
                 });
                 document.getElementById("dbStatus").innerText = `雲端狀態：已同步 ${snapshot.size} 個點位`;
             });
         }
 
+        // B. 路徑規劃工具 (自動導航)
+        function calculateRoute(destination, name) {
+            if (!userMarker) return alert("尚未取得 GPS 位置");
+            
+            directionsService.route({
+                origin: userMarker.getPosition(),
+                destination: destination,
+                travelMode: google.maps.TravelMode.DRIVING
+            }, (result, status) => {
+                if (status === "OK") {
+                    directionsRenderer.setDirections(result);
+                    document.getElementById("navInfo").innerText = `導航中：前往 ${name}`;
+                }
+            });
+        }
+
+        // C. 即時監控邏輯 (含 Firebase 更新)
         function startGPS() {
             if (navigator.geolocation) {
                 navigator.geolocation.watchPosition((p) => {
                     const latLng = { lat: p.coords.latitude, lng: p.coords.longitude };
-                    if (!userMarker) userMarker = new google.maps.Marker({ position: latLng, map: map, label: "您" });
-                    else userMarker.setPosition(latLng);
                     
-                    document.getElementById("gpsStatus").innerText = `GPS 定位正常 (誤差: ${p.coords.accuracy.toFixed(0)}m)`;
+                    if (!userMarker) {
+                        userMarker = new google.maps.Marker({ position: latLng, map: map, label: "您" });
+                        map.setCenter(latLng);
+                    } else {
+                        userMarker.setPosition(latLng);
+                    }
                     
-                    // 偵測距離
+                    document.getElementById("gpsStatus").innerText = `GPS 誤差: ${p.coords.accuracy.toFixed(0)}m`;
+
                     let alertText = "";
-                    supplyPoints.forEach(sp => {
+                    supplyPoints.forEach(async (sp) => {
                         const dist = google.maps.geometry.spherical.computeDistanceBetween(
                             new google.maps.LatLng(latLng.lat, latLng.lng),
                             new google.maps.LatLng(sp.position.lat, sp.position.lng)
                         );
-                        if (dist < 50) alertText = `⚠️ 到達：${sp.name} (距離 ${dist.toFixed(0)}m)`;
+
+                        // 當靠近補給點時 (小於 30 公尺)
+                        if (dist < 30 && sp.status !== 'arrived') {
+                            alertText = `⚠️ 抵達點位：${sp.name}`;
+                            // 更新 Firebase 狀態
+                            await updateDoc(doc(db, "supplies", sp.id), {
+                                status: "arrived",
+                                lastVisit: serverTimestamp()
+                            });
+                        }
                     });
+
                     const box = document.getElementById("alertBox");
                     if (alertText) { box.innerText = alertText; box.style.display = "block"; }
                     else { box.style.display = "none"; }
@@ -124,7 +187,7 @@
             }
         }
 
-        // 💡 修正 2：更強大的 KML 解析邏輯
+        // KML 解析與自動匯入
         document.getElementById('kmlInput').addEventListener('change', function(e) {
             const file = e.target.files[0];
             const reader = new FileReader();
@@ -135,23 +198,26 @@
 
                 for (let pm of placemarks) {
                     const name = pm.querySelector("name")?.textContent || "未命名";
-                    // 嘗試多種座標抓取方式
                     const coordNode = pm.getElementsByTagName("coordinates")[0];
                     if (coordNode) {
-                        const raw = coordNode.textContent.trim().split(/\s+/)[0]; // 抓第一組座標
+                        const raw = coordNode.textContent.trim().split(/\s+/)[0];
                         const [lng, lat] = raw.split(",").map(Number);
                         
                         if (!isNaN(lat) && !isNaN(lng)) {
+                            // 預設將包含 "油" 的名稱設為 fuel 類型
+                            const type = name.includes("油") ? "fuel" : "medical";
                             await addDoc(collection(db, "supplies"), {
                                 name,
                                 position: { lat, lng },
+                                type: type,
+                                status: "active",
                                 createdAt: serverTimestamp()
                             });
                             count++;
                         }
                     }
                 }
-                alert(`匯入完成！成功新增 ${count} 筆點位。`);
+                alert(`匯入完成！成功新增 ${count} 筆勤務點位。`);
             };
             reader.readAsText(file);
         });
